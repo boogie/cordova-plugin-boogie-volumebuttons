@@ -1,0 +1,47 @@
+{
+  "name": "cordova-plugin-boogie-volumebuttons",
+  "version": "1.0.0",
+  "description": "Detect hardware volume Up/Down button presses as events — even while the app is backgrounded or the screen is locked. Optionally suppress the system volume HUD and hold the volume at a baseline so presses keep firing at the 0/max edges (Android, iOS, browser). JS global: boogieVolumeButtons.",
+  "cordova": {
+    "id": "cordova-plugin-boogie-volumebuttons",
+    "platforms": [
+      "android",
+      "ios",
+      "browser"
+    ]
+  },
+  "types": "./index.d.ts",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boogie/cordova-plugin-boogie-volumebuttons.git"
+  },
+  "bugs": {
+    "url": "https://github.com/boogie/cordova-plugin-boogie-volumebuttons/issues"
+  },
+  "homepage": "https://github.com/boogie/cordova-plugin-boogie-volumebuttons#readme",
+  "keywords": [
+    "volume",
+    "buttons",
+    "volume-buttons",
+    "hardware-buttons",
+    "volume-up",
+    "volume-down",
+    "keys",
+    "remote",
+    "ecosystem:cordova",
+    "cordova-android",
+    "cordova-ios",
+    "cordova-browser"
+  ],
+  "engines": [
+    {
+      "name": "cordova",
+      "version": ">=9.0.0"
+    }
+  ],
+  "author": "András Bártházi",
+  "license": "MIT"
+}

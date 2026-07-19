@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
+        id="cordova-plugin-boogie-volumebuttons"
+        version="1.0.0">
+    <name>Boogie Volume Buttons</name>
+    <description>Detect hardware volume Up/Down button presses as events — even while the app is backgrounded or the screen is locked. Optionally suppress the system volume HUD and hold the volume at a baseline so presses keep firing at the 0/max edges (Android, iOS, browser). JS global: boogieVolumeButtons.</description>
+    <license>MIT</license>
+    <keywords>cordova,volume,buttons,hardware,keys,volume-up,volume-down,remote</keywords>
+
+    <engines>
+        <engine name="cordova" version=">=9.0.0" />
+    </engines>
+
+    <js-module src="www/volumebuttons.js" name="volumebuttons">
+        <clobbers target="boogieVolumeButtons" />
+    </js-module>
+
+    <!-- ============================ Android ============================ -->
+    <platform name="android">
+        <config-file target="res/xml/config.xml" parent="/*">
+            <feature name="VolumeButtonsPlugin">
+                <param name="android-package" value="hu.barthazi.volumebuttons.VolumeButtonsPlugin" />
+            </feature>
+        </config-file>
+
+        <source-file src="src/android/VolumeButtonsPlugin.java" target-dir="src/hu/barthazi/volumebuttons" />
+    </platform>
+
+    <!-- ============================== iOS ============================== -->
+    <platform name="ios">
+        <config-file target="config.xml" parent="/*">
+            <feature name="VolumeButtonsPlugin">
+                <param name="ios-package" value="VolumeButtonsPlugin" />
+            </feature>
+        </config-file>
+
+        <header-file src="src/ios/VolumeButtonsPlugin.h" />
+        <source-file src="src/ios/VolumeButtonsPlugin.m" />
+        <resource-file src="src/ios/silence.mp3" target="silence.mp3" />
+
+        <framework src="MediaPlayer.framework" />
+        <framework src="AVFoundation.framework" />
+    </platform>
+
+    <!-- ============================ Browser ============================ -->
+    <platform name="browser">
+        <!-- Simulates the hardware keys from the keyboard so the same app code
+             runs on the desktop. -->
+        <js-module src="src/browser/volumebuttons.js" name="VolumeButtonsProxy">
+            <runs />
+        </js-module>
+    </platform>
+</plugin>
