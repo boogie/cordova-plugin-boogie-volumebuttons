@@ -9,18 +9,29 @@
 //   - after each press, snap the level back to a mid baseline (keepAtBaseline)
 //     so presses still register at the 0/max edges and the real volume doesn't
 //     drift.
-// A looping silent player keeps the audio session active so events keep
-// arriving while backgrounded or the screen is locked (background).
+// A looping ambient player (silence, white noise, or rain) keeps the audio
+// session active so events keep arriving while backgrounded or the screen is
+// locked — which additionally requires the host app to enable the Audio
+// background mode (see README).
+//
+// Cold start: an active .playback session is what routes the hardware buttons to
+// the *media* volume (so outputVolume KVO fires) rather than the ringer. If that
+// activation loses the race at launch, presses adjust the ringer and nothing is
+// detected until an app-active cycle re-activates — the classic "works only
+// after a lock/unlock" bug. We defeat it by re-activating once shortly after
+// start (the JPSVolumeButtonHandler trick).
 //
 // Note: MPVolumeView-based volume changes do not work on the iOS Simulator —
 // test on a device.
 
 static const float kVolumeStep = 1.0f / 16.0f; // a typical hardware increment
 static const float kEpsilon = 0.0005f;
+static const NSTimeInterval kColdStartRekickDelay = 0.4; // seconds
 
 @interface VolumeButtonsPlugin ()
 @property (nonatomic, strong) MPVolumeView* volumeView;
-@property (nonatomic, strong) AVAudioPlayer* silentPlayer;
+@property (nonatomic, strong) AVAudioPlayer* ambientPlayer;
+@property (nonatomic, copy) NSString* currentSound; // the sound the player is loaded with
 @property (nonatomic, copy) NSString* callbackId;
 @property (nonatomic, assign) BOOL running;
 @property (nonatomic, assign) BOOL volumeViewAttached;
@@ -30,6 +41,8 @@ static const float kEpsilon = 0.0005f;
 @property (nonatomic, assign) BOOL keepAtBaseline;
 @property (nonatomic, assign) BOOL background;
 @property (nonatomic, assign) float baseline;
+@property (nonatomic, copy) NSString* soundName;
+@property (nonatomic, assign) float soundVolume;
 
 @property (nonatomic, assign) float lastVolume;
 @property (nonatomic, assign) float initialVolume;
@@ -50,6 +63,8 @@ static const float kEpsilon = 0.0005f;
     self.keepAtBaseline = YES;
     self.background = YES;
     self.baseline = 0.5f;
+    self.soundName = @"silence";
+    self.soundVolume = 0.3f;
     self.lastEventTime = -1;
 
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -88,13 +103,26 @@ static const float kEpsilon = 0.0005f;
 
     [self activateSession];
     if (self.background) {
-        [self startSilentPlayer];
+        [self startAmbientPlayer];
     }
     [self refreshVolumeView];
     [self startObserving];
     if (self.keepAtBaseline) {
         [self applyVolume:self.baseline];
     }
+
+    // Cold-start repair: re-activate once shortly after launch so the buttons
+    // are pointed at the media volume even if the first activation lost the race.
+    __weak VolumeButtonsPlugin* weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kColdStartRekickDelay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        VolumeButtonsPlugin* strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.running) return;
+        [strongSelf activateSession];
+        if (strongSelf.background) [strongSelf startAmbientPlayer];
+        [strongSelf refreshVolumeView];
+        if (strongSelf.keepAtBaseline) [strongSelf applyVolume:strongSelf.baseline];
+    });
 
     // Keep the callback open for the event stream.
     CDVPluginResult* keep = [CDVPluginResult resultWithStatus:CDVCommandStatus_NO_RESULT];
@@ -115,10 +143,10 @@ static const float kEpsilon = 0.0005f;
     [self applyOptions:[command argumentAtIndex:0 withDefault:@{}]];
 
     if (self.running) {
-        if (self.background && !self.silentPlayer) {
-            [self startSilentPlayer];
-        } else if (!self.background && self.silentPlayer) {
-            [self stopSilentPlayer];
+        if (self.background) {
+            [self startAmbientPlayer]; // reloads if the sound/volume changed
+        } else {
+            [self stopAmbientPlayer];
         }
         [self refreshVolumeView];
         if (self.keepAtBaseline && !wasKeeping) {
@@ -201,8 +229,13 @@ static const float kEpsilon = 0.0005f;
     if (options[@"keepAtBaseline"]) self.keepAtBaseline = [options[@"keepAtBaseline"] boolValue];
     if (options[@"background"]) self.background = [options[@"background"] boolValue];
     if (options[@"baseline"] != nil) {
-        float b = [options[@"baseline"] floatValue];
-        self.baseline = fmaxf(0.0f, fminf(1.0f, b));
+        self.baseline = fmaxf(0.0f, fminf(1.0f, [options[@"baseline"] floatValue]));
+    }
+    if ([options[@"sound"] isKindOfClass:[NSString class]]) {
+        self.soundName = options[@"sound"];
+    }
+    if (options[@"soundVolume"] != nil) {
+        self.soundVolume = fmaxf(0.0f, fminf(1.0f, [options[@"soundVolume"] floatValue]));
     }
 }
 
@@ -221,33 +254,46 @@ static const float kEpsilon = 0.0005f;
     }
 }
 
-- (void)startSilentPlayer
+// Loads and loops the selected ambient sound. Silence plays at volume 0; audible
+// sounds make the Audio background mode App-Store-defensible. Reloads when the
+// selected sound changes; only adjusts volume/resumes otherwise.
+- (void)startAmbientPlayer
 {
-    if (self.silentPlayer) {
-        if (!self.silentPlayer.isPlaying) [self.silentPlayer play];
+    NSString* desired = self.soundName.length ? self.soundName : @"silence";
+    float volume = [desired isEqualToString:@"silence"] ? 0.0f : self.soundVolume;
+
+    if (self.ambientPlayer && [self.currentSound isEqualToString:desired]) {
+        self.ambientPlayer.volume = volume;
+        if (!self.ambientPlayer.isPlaying) [self.ambientPlayer play];
         return;
     }
-    NSString* path = [[NSBundle mainBundle] pathForResource:@"silence" ofType:@"mp3"];
+
+    [self.ambientPlayer stop];
+    self.ambientPlayer = nil;
+
+    NSString* path = [[NSBundle mainBundle] pathForResource:desired ofType:@"mp3"];
     if (!path) {
-        NSLog(@"VolumeButtonsPlugin: silence.mp3 not found; background detection may pause when suspended");
+        NSLog(@"VolumeButtonsPlugin: %@.mp3 not found; background detection may pause when suspended", desired);
         return;
     }
     NSError* error = nil;
-    self.silentPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:[NSURL fileURLWithPath:path] error:&error];
+    self.ambientPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:[NSURL fileURLWithPath:path] error:&error];
     if (error) {
-        NSLog(@"VolumeButtonsPlugin: silent player init failed: %@", error.localizedDescription);
-        self.silentPlayer = nil;
+        NSLog(@"VolumeButtonsPlugin: ambient player init failed: %@", error.localizedDescription);
+        self.ambientPlayer = nil;
         return;
     }
-    self.silentPlayer.numberOfLoops = -1;
-    self.silentPlayer.volume = 0.0f;
-    [self.silentPlayer play];
+    self.ambientPlayer.numberOfLoops = -1;
+    self.ambientPlayer.volume = volume;
+    [self.ambientPlayer play];
+    self.currentSound = desired;
 }
 
-- (void)stopSilentPlayer
+- (void)stopAmbientPlayer
 {
-    [self.silentPlayer stop];
-    self.silentPlayer = nil;
+    [self.ambientPlayer stop];
+    self.ambientPlayer = nil;
+    self.currentSound = nil;
 }
 
 #pragma mark - Volume view
@@ -344,7 +390,7 @@ static const float kEpsilon = 0.0005f;
         [self applyVolume:self.initialVolume];
     }
     [self detachVolumeView];
-    [self stopSilentPlayer];
+    [self stopAmbientPlayer];
     self.callbackId = nil;
     self.lastEventTime = -1;
 }
@@ -354,7 +400,7 @@ static const float kEpsilon = 0.0005f;
     NSUInteger type = [notification.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
     if (type == AVAudioSessionInterruptionTypeEnded && self.running) {
         [self activateSession];
-        if (self.background) [self startSilentPlayer];
+        if (self.background) [self startAmbientPlayer];
     }
 }
 
@@ -362,7 +408,7 @@ static const float kEpsilon = 0.0005f;
 {
     if (!self.running) return;
     [self activateSession];
-    if (self.background) [self startSilentPlayer];
+    if (self.background) [self startAmbientPlayer];
     [self refreshVolumeView];
 }
 

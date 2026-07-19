@@ -3,7 +3,7 @@
         id="cordova-plugin-boogie-volumebuttons"
         version="1.0.0">
     <name>Boogie Volume Buttons</name>
-    <description>Detect hardware volume Up/Down button presses as events — even while the app is backgrounded or the screen is locked. Optionally suppress the system volume HUD and hold the volume at a baseline so presses keep firing at the 0/max edges (Android, iOS, browser). JS global: boogieVolumeButtons.</description>
+    <description>Detect hardware volume Up/Down button presses as events — even while the app is backgrounded or the screen is locked. Optionally suppress the system volume HUD and hold the volume at a baseline so presses keep firing at the 0/max edges. Derives double-press and hold gestures; configurable ambient keep-alive sound (Android, iOS, browser). JS global: boogieVolumeButtons.</description>
     <license>MIT</license>
     <keywords>cordova,volume,buttons,hardware,keys,volume-up,volume-down,remote</keywords>
 
@@ -14,6 +14,7 @@
     <js-module src="www/volumebuttons.js" name="volumebuttons">
         <clobbers target="boogieVolumeButtons" />
     </js-module>
+    <js-module src="www/gestures.js" name="gestures" />
 
     <!-- ============================ Android ============================ -->
     <platform name="android">
@@ -24,6 +25,11 @@
         </config-file>
 
         <source-file src="src/android/VolumeButtonsPlugin.java" target-dir="src/hu/barthazi/volumebuttons" />
+
+        <!-- Ambient keep-alive sounds (res/raw so MediaPlayer can load them by name). -->
+        <resource-file src="src/audio/silence.mp3" target="res/raw/silence.mp3" />
+        <resource-file src="src/audio/whitenoise.mp3" target="res/raw/whitenoise.mp3" />
+        <resource-file src="src/audio/rain.mp3" target="res/raw/rain.mp3" />
     </platform>
 
     <!-- ============================== iOS ============================== -->
@@ -36,10 +42,20 @@
 
         <header-file src="src/ios/VolumeButtonsPlugin.h" />
         <source-file src="src/ios/VolumeButtonsPlugin.m" />
-        <resource-file src="src/ios/silence.mp3" target="silence.mp3" />
+
+        <!-- Ambient keep-alive sounds (bundled at the app root, loaded by name). -->
+        <resource-file src="src/audio/silence.mp3" target="silence.mp3" />
+        <resource-file src="src/audio/whitenoise.mp3" target="whitenoise.mp3" />
+        <resource-file src="src/audio/rain.mp3" target="rain.mp3" />
 
         <framework src="MediaPlayer.framework" />
         <framework src="AVFoundation.framework" />
+
+        <!-- Locked-screen detection needs the Audio background mode. Off by
+             default (App Store 2.5.4 risk for silence-only audio); enable with
+             `--variable ENABLE_LOCKSCREEN=true`, ideally with an audible sound. -->
+        <preference name="ENABLE_LOCKSCREEN" default="false" />
+        <hook type="after_plugin_install" src="hooks/enable_background_audio.js" />
     </platform>
 
     <!-- ============================ Browser ============================ -->

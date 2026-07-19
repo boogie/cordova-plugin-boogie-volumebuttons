@@ -10,11 +10,28 @@ function countCalls (action) {
     return mock.calls.filter((c) => c.action === action).length;
 }
 
-const DEFAULT_OPTIONS = {
+// What the bridge sends to native on start/configure.
+const NATIVE_DEFAULTS = {
     suppressIndicator: true,
     keepAtBaseline: true,
     baseline: 0.5,
-    background: true
+    background: true,
+    sound: 'silence',
+    soundVolume: 0.3,
+    holdMs: 500
+};
+
+// What getOptions() reports (detection + JS gesture tuning).
+const FULL_OPTIONS = {
+    suppressIndicator: true,
+    keepAtBaseline: true,
+    baseline: 0.5,
+    background: true,
+    sound: 'silence',
+    soundVolume: 0.3,
+    doublePressWindow: 350,
+    holdMs: 500,
+    repeatGap: 300
 };
 
 test('the first button listener arms detection, the last removal disarms it', () => {
@@ -24,12 +41,20 @@ test('the first button listener arms detection, the last removal disarms it', ()
 
     assert.strictEqual(countCalls('start'), 1, 'armed once for both listeners');
     assert.strictEqual(mock.lastCall('start').service, 'VolumeButtonsPlugin');
-    assert.deepStrictEqual(mock.lastCall('start').args, [DEFAULT_OPTIONS]);
+    assert.deepStrictEqual(mock.lastCall('start').args, [NATIVE_DEFAULTS]);
 
     offA();
     assert.strictEqual(countCalls('stop'), 0, 'a listener remains');
     offB();
     assert.strictEqual(countCalls('stop'), 1, 'disarmed with the last removal');
+});
+
+test('a gesture listener also arms detection', () => {
+    const vb = mock.loadPlugin();
+    vb.on('double', () => {});
+    assert.strictEqual(countCalls('start'), 1);
+    vb.on('hold', () => {});
+    assert.strictEqual(countCalls('start'), 1, 'still armed once');
 });
 
 test('a native event fans out to "volume" and the direction-specific event', () => {
@@ -83,7 +108,10 @@ test('configure() applies live while running and merges/clamps otherwise', () =>
         suppressIndicator: false,
         keepAtBaseline: true,
         baseline: 1,
-        background: true
+        background: true,
+        sound: 'silence',
+        soundVolume: 0.3,
+        holdMs: 500
     }]);
 
     // Not running: remembered only, no exec traffic, applied to the next start.
@@ -94,6 +122,46 @@ test('configure() applies live while running and merges/clamps otherwise', () =>
     vb.on('volume', () => {});
     assert.strictEqual(mock.lastCall('start').args[0].background, false);
     assert.strictEqual(mock.lastCall('start').args[0].baseline, 1);
+});
+
+test('configure() carries the ambient sound and clamps soundVolume', () => {
+    const vb = mock.loadPlugin();
+    vb.on('volume', () => {});
+    const result = vb.configure({ sound: 'rain', soundVolume: 5 });
+    assert.strictEqual(result.sound, 'rain');
+    assert.strictEqual(result.soundVolume, 1);
+    assert.strictEqual(mock.lastCall('configure').args[0].sound, 'rain');
+    assert.strictEqual(mock.lastCall('configure').args[0].soundVolume, 1);
+
+    // Unknown sounds are ignored.
+    vb.configure({ sound: 'thunder' });
+    assert.strictEqual(vb.getOptions().sound, 'rain');
+    assert.deepStrictEqual(vb.sounds, ['silence', 'whitenoise', 'rain']);
+});
+
+test('holdMs tunes both the gesture layer and the native option', () => {
+    const vb = mock.loadPlugin();
+    vb.on('volume', () => {});
+    vb.configure({ holdMs: 800 });
+    assert.strictEqual(vb.getOptions().holdMs, 800);
+    assert.strictEqual(mock.lastCall('configure').args[0].holdMs, 800);
+});
+
+test('native precise hold gestures are routed to hold/holdend', () => {
+    const vb = mock.loadPlugin();
+    const holds = [];
+    const ends = [];
+    vb.on('hold', (e) => holds.push(e));
+    vb.on('holdend', (e) => ends.push(e));
+
+    const native = mock.lastCall('start');
+    native.success({ gesture: 'holdstart', direction: 'up', duration: 0, timestamp: 1 });
+    native.success({ gesture: 'holdend', direction: 'up', duration: 900, timestamp: 2 });
+
+    assert.strictEqual(holds.length, 1);
+    assert.strictEqual(holds[0].source, 'native');
+    assert.strictEqual(ends.length, 1);
+    assert.strictEqual(ends[0].duration, 900);
 });
 
 test('getVolume resolves the native value', async () => {
@@ -143,10 +211,11 @@ test('a throwing listener does not break the others', () => {
 test('events list and getOptions expose stable copies', () => {
     const vb = mock.loadPlugin();
     assert.ok(Array.isArray(vb.events));
-    for (const required of ['volume', 'up', 'down', 'error']) {
+    for (const required of ['volume', 'up', 'down', 'double', 'doubleup', 'doubledown',
+        'hold', 'holdend', 'error']) {
         assert.ok(vb.events.includes(required), required);
     }
-    assert.deepStrictEqual(vb.getOptions(), DEFAULT_OPTIONS);
+    assert.deepStrictEqual(vb.getOptions(), FULL_OPTIONS);
     vb.getOptions().baseline = 0; // mutating the copy must not leak
     assert.strictEqual(vb.getOptions().baseline, 0.5);
 });

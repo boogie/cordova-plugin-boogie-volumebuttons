@@ -6,24 +6,34 @@
 // volume HUD and snaps the level back to a mid baseline after each press;
 // without that snap the volume sticks at 0 or 1 and further presses stop
 // registering. Android reads the real key events in the foreground and a
-// volume-change broadcast (kept alive by a silent audio track) while
+// volume-change broadcast (kept alive by a looping ambient sound) while
 // backgrounded or locked. The browser build maps keyboard keys so the same app
 // code is testable on the desktop.
 //
-// Subscribing to a button event lazily arms native detection; removing the last
-// listener disarms it, so the audio session and hidden volume view are never
-// held without a consumer.
+// Beyond the raw presses ('volume'/'up'/'down') a small gesture layer derives
+// 'double' and 'hold'/'holdend' on top of the stream.
+//
+// Subscribing to a button/gesture event lazily arms native detection; removing
+// the last listener disarms it, so the audio session and hidden volume view are
+// never held without a consumer.
 
 'use strict';
 
 var exec = require('cordova/exec');
+var gestures = require('./gestures');
 
 var SERVICE = 'VolumeButtonsPlugin';
 
-// Events backed by the native detector...
-var BUTTON_EVENTS = ['volume', 'up', 'down'];
-// ...plus 'error', which reports a failure from that detector.
-var ALL_EVENTS = BUTTON_EVENTS.concat(['error']);
+// Raw press events straight off the native stream...
+var RAW_EVENTS = ['volume', 'up', 'down'];
+// ...and gestures derived from that stream by the JS layer.
+var GESTURE_EVENTS = ['double', 'doubleup', 'doubledown', 'hold', 'holdend'];
+// Any of these, when subscribed, needs the native stream running.
+var ARMING_EVENTS = RAW_EVENTS.concat(GESTURE_EVENTS);
+// ...plus 'error', which reports a failure from the native detector.
+var ALL_EVENTS = ARMING_EVENTS.concat(['error']);
+
+var SOUNDS = ['silence', 'whitenoise', 'rain'];
 
 var listeners = {}; // type -> array of callbacks
 var running = false;
@@ -32,10 +42,19 @@ var options = {
     suppressIndicator: true, // hide the system volume HUD
     keepAtBaseline: true,    // snap the volume back to `baseline` after each press
     baseline: 0.5,           // 0..1, the level snapped back to (mid = headroom both ways)
-    background: true         // keep detecting while backgrounded / screen locked
+    background: true,        // keep detecting while backgrounded / screen locked
+    sound: 'silence',        // ambient sound kept looping to stay alive: SOUNDS
+    soundVolume: 0.3         // 0..1, volume of the ambient sound (ignored for 'silence')
 };
 
-function clamp01(value, fallback) {
+// JS-only gesture tuning (never sent to native).
+var gestureOptions = {
+    doublePressWindow: 350,
+    holdMs: 500,
+    repeatGap: 300
+};
+
+function clamp01 (value, fallback) {
     value = Number(value);
     if (!isFinite(value)) return fallback;
     if (value < 0) return 0;
@@ -43,7 +62,7 @@ function clamp01(value, fallback) {
     return value;
 }
 
-function dispatch(type, event) {
+function dispatch (type, event) {
     var list = listeners[type];
     if (!list || !list.length) return;
     list.slice(0).forEach(function (fn) {
@@ -57,49 +76,66 @@ function dispatch(type, event) {
     });
 }
 
-function hasButtonListener() {
-    return BUTTON_EVENTS.some(function (type) {
+var engine = gestures.create(dispatch, gestureOptions);
+
+function hasButtonListener () {
+    return ARMING_EVENTS.some(function (type) {
         return listeners[type] && listeners[type].length > 0;
     });
 }
 
-// One native event fans out to 'volume' and to the direction-specific event.
-function onVolumeEvent(event) {
+// One native message is either a raw press or a precise hold marker (Android).
+function onVolumeEvent (event) {
+    if (event && event.gesture === 'holdstart') {
+        engine.holdStart(event);
+        return;
+    }
+    if (event && event.gesture === 'holdend') {
+        engine.holdEnd(event);
+        return;
+    }
     dispatch('volume', event);
     if (event && (event.direction === 'up' || event.direction === 'down')) {
         dispatch(event.direction, event);
     }
+    engine.push(event);
 }
 
-function onError(error) {
+function onError (error) {
     dispatch('error', {
         code: (error && error.code) || 0,
         message: (error && error.message) || String(error)
     });
 }
 
-function nativeOptions() {
+function nativeOptions () {
     return {
         suppressIndicator: !!options.suppressIndicator,
         keepAtBaseline: !!options.keepAtBaseline,
         baseline: clamp01(options.baseline, 0.5),
-        background: !!options.background
+        background: !!options.background,
+        sound: SOUNDS.indexOf(options.sound) > -1 ? options.sound : 'silence',
+        soundVolume: clamp01(options.soundVolume, 0.3),
+        // Sent so Android can time its precise (key up/down) hold detection;
+        // iOS/browser infer holds in the JS gesture layer instead.
+        holdMs: gestureOptions.holdMs
     };
 }
 
 // Arm/disarm native detection to match the current listener set.
-function syncDetection() {
+function syncDetection () {
     var need = hasButtonListener();
     if (need && !running) {
         running = true;
         exec(onVolumeEvent, onError, SERVICE, 'start', [nativeOptions()]);
     } else if (!need && running) {
         running = false;
+        engine.reset();
         exec(null, null, SERVICE, 'stop', []);
     }
 }
 
-function assertType(type) {
+function assertType (type) {
     if (ALL_EVENTS.indexOf(type) === -1) {
         throw new Error('boogieVolumeButtons: unknown event "' + type +
             '". Known events: ' + ALL_EVENTS.join(', '));
@@ -108,12 +144,15 @@ function assertType(type) {
 
 var boogieVolumeButtons = {
     /**
-     * Subscribes to an event. The first button-event subscriber arms native
+     * Subscribes to an event. The first button/gesture subscriber arms native
      * detection. Returns an unsubscribe function for this exact subscription.
      *
      * Events:
      *   'volume' — any press: { direction:'up'|'down', steps, level, delta, timestamp }
      *   'up' / 'down' — the same payload, filtered by direction
+     *   'double' / 'doubleup' / 'doubledown' — two same-direction taps in a window
+     *   'hold' — a sustained press begins: { direction, duration, source, timestamp }
+     *   'holdend' — a sustained press ends: { direction, duration, timestamp }
      *   'error' — { code, message }
      */
     on: function (type, callback) {
@@ -155,10 +194,11 @@ var boogieVolumeButtons = {
     },
 
     /**
-     * Merges detection options over the current ones and, if detection is
-     * running, applies them live (no dropped events).
+     * Merges options over the current ones. Detection options are applied live
+     * (native) while running; gesture options tune the JS layer immediately.
      *
-     * @param {Object} opts { suppressIndicator, keepAtBaseline, baseline, background }
+     * @param {Object} opts { suppressIndicator, keepAtBaseline, baseline,
+     *   background, sound, soundVolume, doublePressWindow, holdMs, repeatGap }
      * @returns {Object} the resulting options
      */
     configure: function (opts) {
@@ -167,21 +207,37 @@ var boogieVolumeButtons = {
         if ('keepAtBaseline' in opts) options.keepAtBaseline = !!opts.keepAtBaseline;
         if ('baseline' in opts) options.baseline = clamp01(opts.baseline, options.baseline);
         if ('background' in opts) options.background = !!opts.background;
+        if ('sound' in opts && SOUNDS.indexOf(opts.sound) > -1) options.sound = opts.sound;
+        if ('soundVolume' in opts) options.soundVolume = clamp01(opts.soundVolume, options.soundVolume);
+
+        if ('doublePressWindow' in opts) gestureOptions.doublePressWindow = Number(opts.doublePressWindow);
+        if ('holdMs' in opts) gestureOptions.holdMs = Number(opts.holdMs);
+        if ('repeatGap' in opts) gestureOptions.repeatGap = Number(opts.repeatGap);
+        engine.setOptions(gestureOptions);
+
         if (running) {
             exec(null, onError, SERVICE, 'configure', [nativeOptions()]);
         }
         return this.getOptions();
     },
 
-    /** Returns a copy of the current detection options. */
+    /** Returns a copy of the current options (detection + gestures). */
     getOptions: function () {
         return {
             suppressIndicator: options.suppressIndicator,
             keepAtBaseline: options.keepAtBaseline,
             baseline: options.baseline,
-            background: options.background
+            background: options.background,
+            sound: options.sound,
+            soundVolume: options.soundVolume,
+            doublePressWindow: gestureOptions.doublePressWindow,
+            holdMs: gestureOptions.holdMs,
+            repeatGap: gestureOptions.repeatGap
         };
     },
+
+    /** The ambient sounds that can be looped to stay alive in the background. */
+    sounds: SOUNDS.slice(),
 
     /** Resolves the current output volume as a number in 0..1. */
     getVolume: function () {

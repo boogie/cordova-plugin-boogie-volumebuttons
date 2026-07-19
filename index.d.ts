@@ -14,6 +14,20 @@ interface BoogieVolumeButtonsEvent {
     timestamp: number;
 }
 
+interface BoogieVolumeButtonsDoubleEvent {
+    direction: 'up' | 'down';
+    timestamp: number;
+}
+
+interface BoogieVolumeButtonsHoldEvent {
+    direction: 'up' | 'down';
+    /** ms held so far (hold) or in total (holdend). `hold` is 0 for native start. */
+    duration: number;
+    /** 'native' = precise (Android foreground key up/down); 'inferred' = from auto-repeat. */
+    source?: 'native' | 'inferred';
+    timestamp: number;
+}
+
 interface BoogieVolumeButtonsErrorEvent {
     code: number;
     message: string;
@@ -23,8 +37,15 @@ interface BoogieVolumeButtonsEventMap {
     volume: BoogieVolumeButtonsEvent;
     up: BoogieVolumeButtonsEvent;
     down: BoogieVolumeButtonsEvent;
+    double: BoogieVolumeButtonsDoubleEvent;
+    doubleup: BoogieVolumeButtonsDoubleEvent;
+    doubledown: BoogieVolumeButtonsDoubleEvent;
+    hold: BoogieVolumeButtonsHoldEvent;
+    holdend: BoogieVolumeButtonsHoldEvent;
     error: BoogieVolumeButtonsErrorEvent;
 }
+
+type BoogieVolumeButtonsSound = 'silence' | 'whitenoise' | 'rain';
 
 interface BoogieVolumeButtonsOptions {
     /**
@@ -40,15 +61,31 @@ interface BoogieVolumeButtonsOptions {
     /** Level to snap back to when keepAtBaseline is on, 0..1. Default 0.5. */
     baseline?: number;
     /**
-     * Keep detecting while backgrounded or the screen is locked (silent audio
-     * session/track). Costs a little battery. Default true.
+     * Keep detecting while backgrounded or the screen is locked. On iOS this
+     * needs the host app to enable the Audio background mode — see the README.
+     * Default true.
      */
     background?: boolean;
+    /**
+     * The ambient sound looped to keep the app alive in the background. An
+     * audible sound ('whitenoise'/'rain') makes the iOS Audio background mode
+     * App-Store-defensible; 'silence' is inaudible but riskier to justify.
+     * Default 'silence'.
+     */
+    sound?: BoogieVolumeButtonsSound;
+    /** Volume of the ambient sound, 0..1 (ignored for 'silence'). Default 0.3. */
+    soundVolume?: number;
+    /** Max ms between the two taps of a `double`. Default 350. */
+    doublePressWindow?: number;
+    /** Min ms a press must be sustained to count as a `hold`. Default 500. */
+    holdMs?: number;
+    /** Max ms between presses to treat them as one hold/auto-repeat run. Default 300. */
+    repeatGap?: number;
 }
 
 interface BoogieVolumeButtons {
     /**
-     * Subscribes to an event; the first button-event subscriber arms detection.
+     * Subscribes to an event; the first button/gesture subscriber arms detection.
      * Returns an unsubscribe function for this exact subscription.
      */
     on<K extends keyof BoogieVolumeButtonsEventMap>(
@@ -71,11 +108,14 @@ interface BoogieVolumeButtons {
         callback?: (event: BoogieVolumeButtonsEventMap[K]) => void
     ): void;
 
-    /** Merges options over the current ones; applied live while running. */
+    /** Merges options over the current ones; detection options apply live while running. */
     configure(options: BoogieVolumeButtonsOptions): Required<BoogieVolumeButtonsOptions>;
 
-    /** Returns a copy of the current detection options. */
+    /** Returns a copy of the current options. */
     getOptions(): Required<BoogieVolumeButtonsOptions>;
+
+    /** The ambient sounds available for the background keep-alive. */
+    sounds: BoogieVolumeButtonsSound[];
 
     /** Resolves the current output volume, 0..1. */
     getVolume(): Promise<number>;

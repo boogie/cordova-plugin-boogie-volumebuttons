@@ -13,10 +13,8 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.media.AudioAttributes;
-import android.media.AudioFormat;
 import android.media.AudioManager;
-import android.media.AudioTrack;
+import android.media.MediaPlayer;
 import android.os.Build;
 import android.view.KeyEvent;
 import android.view.View;
@@ -26,12 +24,13 @@ import android.view.View;
  *
  * Foreground: a key listener on the WebView reads the real KEYCODE_VOLUME_*
  * events; consuming them (suppressIndicator) both detects the press and stops
- * the volume from changing / the HUD from showing.
+ * the volume from changing / the HUD from showing. Auto-repeat while held gives
+ * a precise hold (holdstart on threshold, holdend on release with duration).
  *
  * Background / locked: key events don't reach a backgrounded activity, so a
- * VOLUME_CHANGED broadcast receiver takes over, kept alive by a silent
- * AudioTrack. The receiver ignores changes while foregrounded so a press is
- * never reported twice.
+ * VOLUME_CHANGED broadcast receiver takes over, kept alive by a looping ambient
+ * MediaPlayer (silence / white noise / rain). The receiver ignores changes while
+ * foregrounded so a press is never reported twice.
  *
  * No special permissions are required.
  */
@@ -51,12 +50,21 @@ public class VolumeButtonsPlugin extends CordovaPlugin {
     private boolean keepAtBaseline = true;
     private boolean background = true;
     private float baseline = 0.5f;
+    private String soundName = "silence";
+    private float soundVolume = 0.3f;
+    private long holdMs = 500;
 
     private int baselineIndex;
     private int lastIndex;
     private long lastEventTime = -1;
 
-    private AudioTrack silentTrack;
+    // Foreground hold tracking.
+    private long downTime = -1;
+    private String downDirection = null;
+    private boolean holdEmitted = false;
+
+    private MediaPlayer ambientPlayer;
+    private String currentSound;
     private boolean receiverRegistered = false;
     private View keyView;
 
@@ -96,19 +104,41 @@ public class VolumeButtonsPlugin extends CordovaPlugin {
     private final View.OnKeyListener keyListener = new View.OnKeyListener() {
         @Override
         public boolean onKey(View v, int keyCode, KeyEvent event) {
-            if (!running || event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            if (!running) return false;
             if (keyCode != KeyEvent.KEYCODE_VOLUME_UP && keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) {
                 return false;
             }
-
             boolean up = keyCode == KeyEvent.KEYCODE_VOLUME_UP;
-            int max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-            int current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
-            int projected = Math.max(0, Math.min(max, current + (up ? 1 : -1)));
-            fireEvent(up ? "up" : "down", 1, (float) projected / max);
+            String dir = up ? "up" : "down";
+            int action = event.getAction();
 
-            // Consuming the event suppresses both the volume change and the HUD.
-            return suppressIndicator;
+            if (action == KeyEvent.ACTION_DOWN) {
+                if (event.getRepeatCount() == 0) {
+                    downTime = event.getEventTime();
+                    downDirection = dir;
+                    holdEmitted = false;
+                    int max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                    int current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+                    int projected = Math.max(0, Math.min(max, current + (up ? 1 : -1)));
+                    fireEvent(dir, 1, max > 0 ? (float) projected / max : 0f);
+                } else if (!holdEmitted && dir.equals(downDirection)
+                        && (event.getEventTime() - downTime) >= holdMs) {
+                    // Held past the threshold: precise hold start.
+                    holdEmitted = true;
+                    fireGesture("holdstart", dir, 0);
+                }
+                // Consuming the event suppresses both the volume change and the HUD.
+                return suppressIndicator;
+            } else if (action == KeyEvent.ACTION_UP) {
+                if (holdEmitted && dir.equals(downDirection)) {
+                    fireGesture("holdend", dir, event.getEventTime() - downTime);
+                }
+                holdEmitted = false;
+                downTime = -1;
+                downDirection = null;
+                return suppressIndicator;
+            }
+            return false;
         }
     };
 
@@ -162,7 +192,7 @@ public class VolumeButtonsPlugin extends CordovaPlugin {
             attachKeyListener();
             if (background) {
                 registerReceiver();
-                startSilentTrack();
+                startAmbientPlayer();
             }
         });
 
@@ -176,7 +206,7 @@ public class VolumeButtonsPlugin extends CordovaPlugin {
         cordova.getActivity().runOnUiThread(() -> {
             detachKeyListener();
             unregisterReceiver();
-            stopSilentTrack();
+            stopAmbientPlayer();
         });
         callback = null;
         lastEventTime = -1;
@@ -191,10 +221,10 @@ public class VolumeButtonsPlugin extends CordovaPlugin {
         cordova.getActivity().runOnUiThread(() -> {
             if (background) {
                 registerReceiver();
-                startSilentTrack();
+                startAmbientPlayer(); // reloads if the sound/volume changed
             } else {
                 unregisterReceiver();
-                stopSilentTrack();
+                stopAmbientPlayer();
             }
         });
     }
@@ -205,6 +235,9 @@ public class VolumeButtonsPlugin extends CordovaPlugin {
         keepAtBaseline = options.optBoolean("keepAtBaseline", keepAtBaseline);
         background = options.optBoolean("background", background);
         baseline = Math.max(0f, Math.min(1f, (float) options.optDouble("baseline", baseline)));
+        soundName = options.optString("sound", soundName);
+        soundVolume = Math.max(0f, Math.min(1f, (float) options.optDouble("soundVolume", soundVolume)));
+        holdMs = options.optLong("holdMs", holdMs);
     }
 
     private void setVolume(float level) {
@@ -268,42 +301,43 @@ public class VolumeButtonsPlugin extends CordovaPlugin {
         receiverRegistered = false;
     }
 
-    // --- Silent audio track (keeps the process receiving events in background) ---
+    // --- Ambient player (keeps the process receiving events in background) ---
 
-    private void startSilentTrack() {
-        if (silentTrack != null) return;
+    private void startAmbientPlayer() {
+        String desired = soundName != null ? soundName : "silence";
+        float vol = "silence".equals(desired) ? 0f : soundVolume;
+
+        if (ambientPlayer != null && desired.equals(currentSound)) {
+            ambientPlayer.setVolume(vol, vol);
+            if (!ambientPlayer.isPlaying()) ambientPlayer.start();
+            return;
+        }
+        stopAmbientPlayer();
+
+        Context context = cordova.getActivity().getApplicationContext();
+        int resId = context.getResources().getIdentifier(desired, "raw", context.getPackageName());
+        if (resId == 0) return;
         try {
-            int sampleRate = 44100;
-            int bufferSize = AudioTrack.getMinBufferSize(sampleRate,
-                    AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            AudioAttributes attributes = new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build();
-            AudioFormat format = new AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .build();
-            silentTrack = new AudioTrack(attributes, format, bufferSize,
-                    AudioTrack.MODE_STATIC, AudioManager.AUDIO_SESSION_ID_GENERATE);
-            byte[] silence = new byte[bufferSize];
-            silentTrack.write(silence, 0, silence.length);
-            silentTrack.setLoopPoints(0, silence.length / 2, -1);
-            silentTrack.play();
+            ambientPlayer = MediaPlayer.create(context, resId);
+            if (ambientPlayer == null) return;
+            ambientPlayer.setLooping(true);
+            ambientPlayer.setVolume(vol, vol);
+            ambientPlayer.start();
+            currentSound = desired;
         } catch (Exception e) {
-            silentTrack = null;
+            ambientPlayer = null;
         }
     }
 
-    private void stopSilentTrack() {
-        if (silentTrack == null) return;
+    private void stopAmbientPlayer() {
+        if (ambientPlayer == null) return;
         try {
-            silentTrack.stop();
-            silentTrack.release();
+            ambientPlayer.stop();
+            ambientPlayer.release();
         } catch (Exception ignored) {
         }
-        silentTrack = null;
+        ambientPlayer = null;
+        currentSound = null;
     }
 
     // --- Event dispatch ---
@@ -324,6 +358,24 @@ public class VolumeButtonsPlugin extends CordovaPlugin {
         } catch (JSONException e) {
             return;
         }
+        send(payload);
+    }
+
+    private void fireGesture(String gesture, String direction, long duration) {
+        if (callback == null) return;
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("gesture", gesture);
+            payload.put("direction", direction);
+            payload.put("duration", duration);
+            payload.put("timestamp", System.currentTimeMillis());
+        } catch (JSONException e) {
+            return;
+        }
+        send(payload);
+    }
+
+    private void send(JSONObject payload) {
         PluginResult result = new PluginResult(PluginResult.Status.OK, payload);
         result.setKeepCallback(true);
         callback.sendPluginResult(result);

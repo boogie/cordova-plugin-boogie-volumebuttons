@@ -88,7 +88,18 @@ test('index.d.ts declares every public bridge method and the global', () => {
     assert.ok(dts.includes('declare var boogieVolumeButtons'), 'index.d.ts must declare the global');
 });
 
-test('iOS bundles the silent audio resource it loads at runtime', () => {
-    assert.ok(pluginXml.includes('resource-file src="src/ios/silence.mp3"'), 'silence.mp3 not bundled');
-    assert.ok(fs.existsSync(path.join(root, 'src', 'ios', 'silence.mp3')), 'silence.mp3 missing');
+test('every ambient sound the bridge exposes is bundled for both platforms and exists', () => {
+    const sounds = [...bridgeJs.matchAll(/'(silence|whitenoise|rain)'/g)].map((m) => m[1]);
+    const set = new Set(sounds);
+    for (const sound of ['silence', 'whitenoise', 'rain']) {
+        assert.ok(set.has(sound), `bridge should know the ${sound} sound`);
+        assert.ok(fs.existsSync(path.join(root, 'src', 'audio', sound + '.mp3')), `${sound}.mp3 missing`);
+        assert.ok(pluginXml.includes(`res/raw/${sound}.mp3`), `${sound}.mp3 not bundled for Android`);
+        assert.ok(pluginXml.includes(`target="${sound}.mp3"`), `${sound}.mp3 not bundled for iOS`);
+    }
+});
+
+test('the gesture module is shipped as a js-module', () => {
+    assert.ok(pluginXml.includes('www/gestures.js'), 'gestures.js not declared in plugin.xml');
+    assert.ok(fs.existsSync(path.join(root, 'www', 'gestures.js')), 'gestures.js missing');
 });

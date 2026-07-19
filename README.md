@@ -7,8 +7,9 @@
 Turn the hardware **volume Up / Down buttons into events** — even while the app
 is **backgrounded or the screen is locked** — on **Android, iOS, and the
 browser**. A tiny, dependency-free bridge with a modern event API, sensible
-defaults, and the one trick that makes volume-button detection actually work:
-holding the level at a baseline so presses keep firing at the 0 / max edges.
+defaults, derived **double-press and hold** gestures, and the one trick that
+makes volume-button detection actually work: holding the level at a baseline so
+presses keep firing at the 0 / max edges.
 
 ```js
 boogieVolumeButtons.on('volume', (e) => {
@@ -24,54 +25,49 @@ controls, accessibility shortcuts, or any hands-free trigger.
 ## Why this is harder than it looks
 
 iOS has **no public "volume button pressed" API**. All you can observe is that
-`AVAudioSession.outputVolume` *changed* — and that reveals two problems this
+`AVAudioSession.outputVolume` *changed* — and that reveals three problems this
 plugin solves for you:
 
 - **The system volume HUD pops up** on every press. A hidden `MPVolumeView` in
   the view hierarchy swallows it (`suppressIndicator`).
 - **The volume sticks at the edges.** At 100 % an up-press changes nothing, so
   no event fires; same at 0 % going down. The fix is to **snap the volume back
-  to a mid baseline** (0.5 by default) after each press, so there is always
-  headroom in both directions (`keepAtBaseline`). Most libraries in this space
-  get this wrong — presses silently stop at the extremes.
+  to a mid baseline** (0.5 by default) after each press (`keepAtBaseline`). Most
+  libraries in this space get this wrong — presses silently stop at the extremes.
+- **The buttons must control *media* volume, not the ringer.** They only do that
+  while the app's audio session is active — so if the session loses the race at
+  launch, nothing is detected until something re-activates it (see
+  [Locked-screen & cold-start](#locked-screen--cold-start-ios)).
 
 Android is cleaner: in the foreground the real `KEYCODE_VOLUME_*` key events are
-read and consumed (no volume change, no HUD); while backgrounded or locked a
-volume-change broadcast — kept alive by a silent audio track — takes over.
+read and consumed (no volume change, no HUD, and a precise long-press); while
+backgrounded or locked a volume-change broadcast — kept alive by a looping
+ambient sound — takes over.
 
 ## Install
-
-From the Git repository:
 
 ```
 cordova plugin add https://github.com/boogie/cordova-plugin-boogie-volumebuttons.git
 ```
 
-Or from a local checkout:
+For **locked-screen detection on iOS**, opt in to the Audio background mode:
 
 ```
-cordova plugin add /path/to/cordova-plugin-boogie-volumebuttons
+cordova plugin add https://github.com/boogie/cordova-plugin-boogie-volumebuttons.git --variable ENABLE_LOCKSCREEN=true
 ```
 
-No configuration and **no special permissions** are required (no microphone, no
-overlay). The defaults suppress the HUD and hold the baseline — the classic
-"stealth remote" behavior — out of the box.
+No special runtime permissions are required (no microphone, no overlay). The
+defaults suppress the HUD and hold the baseline — the classic "stealth remote"
+behavior — out of the box.
 
 ## Quick start
 
 ```js
 document.addEventListener('deviceready', function () {
-  // Any press:
-  const off = boogieVolumeButtons.on('volume', function (e) {
-    console.log(e.direction, e.steps, e.level, e.delta);
-  });
-
-  // Or listen per direction:
-  boogieVolumeButtons.on('up', () => nextSlide());
-  boogieVolumeButtons.on('down', () => prevSlide());
-
-  // Later, stop listening (the last listener removed tears the native side down):
-  // off();
+  boogieVolumeButtons.on('up',     () => nextSlide());
+  boogieVolumeButtons.on('down',   () => prevSlide());
+  boogieVolumeButtons.on('double', (e) => console.log('double', e.direction));
+  boogieVolumeButtons.on('hold',   (e) => console.log('held', e.direction));
 }, false);
 ```
 
@@ -79,36 +75,56 @@ document.addEventListener('deviceready', function () {
 
 The plugin clobbers a global **`boogieVolumeButtons`**.
 
-Subscribing to a button event **lazily arms** native detection; removing the
-last listener **disarms** it, so the audio session and hidden volume view are
-never held without a consumer.
+Subscribing to any button/gesture event **lazily arms** native detection;
+removing the last listener **disarms** it, so the audio session and hidden
+volume view are never held without a consumer.
 
 ### Events
 
-| Event    | Payload |
-|----------|---------|
-| `volume` | `{ direction, steps, level, delta, timestamp }` — fires on any press |
-| `up`     | same payload, only for up-presses |
-| `down`   | same payload, only for down-presses |
-| `error`  | `{ code, message }` |
+| Event | Payload |
+|-------|---------|
+| `volume` | `{ direction, steps, level, delta, timestamp }` — any press |
+| `up` / `down` | same payload, filtered by direction |
+| `double` / `doubleup` / `doubledown` | `{ direction, timestamp }` — two same-direction taps in a window |
+| `hold` | `{ direction, duration, source, timestamp }` — a sustained press begins |
+| `holdend` | `{ direction, duration, timestamp }` — a sustained press ends |
+| `error` | `{ code, message }` |
 
-The event object:
+The press event object:
 
 - **`direction`** — `'up'` or `'down'`.
-- **`steps`** — how many volume increments the press represented (≥ 1; usually
-  1, but a fast multi-step change reports the real count on Android).
-- **`level`** — the output volume the press reached, `0..1` (before any
-  baseline snap-back).
-- **`delta`** — milliseconds since the previous volume event (`0` for the
-  first). Handy for detecting double-presses or rhythms — a discreet way to
-  send more than one signal.
+- **`steps`** — how many volume increments the press represented (≥ 1; usually 1).
+- **`level`** — the output volume the press reached, `0..1` (before any snap-back).
+- **`delta`** — ms since the previous volume event (`0` for the first). Handy for
+  your own rhythm/sequence detection.
 - **`timestamp`** — ms since epoch.
+
+### Gestures (double-press & hold)
+
+Both are derived in the JS layer on top of the raw press stream, so they work on
+all three platforms:
+
+- **`double`** fires when two same-direction taps land within `doublePressWindow`
+  (default 350 ms). A single tap or three-plus rapid presses never fire it.
+- **`hold`** / **`holdend`** mark a sustained press. On **Android in the
+  foreground** they are **precise** — measured from the real key down/up, with an
+  exact `duration` on `holdend` (`source: 'native'`). Everywhere else (iOS, the
+  browser, Android in the background) a hold is **inferred** from the OS
+  auto-repeat burst (`source: 'inferred'`): `hold` fires once the press has been
+  sustained past `holdMs` (default 500 ms), `holdend` when the repeats stop.
+  Because it's inferred there, rapid button-mashing can look like a hold, and the
+  duration is approximate — see the notes below.
+
+> A held button on iOS also emits a stream of raw `volume`/`up`/`down` events
+> (one per OS auto-repeat); the `hold`/`holdend` gestures are the clean
+> abstraction over that. On Android foreground a hold emits one raw press (the
+> initial down) plus `hold`/`holdend`.
 
 ### Subscribing
 
 - **`on(type, callback)`** → `Function` — subscribe; returns an unsubscribe
   function for this exact subscription.
-- **`once(type, callback)`** → `Function` — subscribe for a single event, then
+- **`once(type, callback)`** → `Function` — subscribe for one event, then
   auto-unsubscribe.
 - **`off(type, callback?)`** — remove a subscription, or every listener of the
   type when no callback is given.
@@ -116,104 +132,137 @@ The event object:
 ### Options
 
 - **`configure(options)`** → `Object` — merge options over the current ones and,
-  if detection is running, apply them **live** (no dropped events). Returns the
-  resulting options.
+  if running, apply the detection options **live**. Gesture tuning applies
+  immediately. Returns the resulting options.
 - **`getOptions()`** → `Object` — a copy of the current options.
 
-| Option              | Default | Meaning |
-|---------------------|---------|---------|
-| `suppressIndicator` | `true`  | Hide the system volume HUD. iOS: hidden `MPVolumeView`. Android (foreground): consume the key event. |
-| `keepAtBaseline`    | `true`  | Snap the volume back to `baseline` after each press, so presses keep firing at 0 / max and the real volume doesn't drift. |
-| `baseline`          | `0.5`   | The level (0..1) to snap back to. Mid gives equal headroom both ways. |
-| `background`        | `true`  | Keep detecting while backgrounded / the screen is locked (silent audio session/track). Costs a little battery. |
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `suppressIndicator` | `true` | Hide the system volume HUD. iOS: hidden `MPVolumeView`. Android (foreground): consume the key event. |
+| `keepAtBaseline` | `true` | Snap the volume back to `baseline` after each press. |
+| `baseline` | `0.5` | The level (0..1) to snap back to. |
+| `background` | `true` | Keep detecting while backgrounded / locked (needs setup on iOS — see below). |
+| `sound` | `'silence'` | Ambient keep-alive sound: `'silence'`, `'whitenoise'`, or `'rain'` (see `.sounds`). |
+| `soundVolume` | `0.3` | Volume of the ambient sound, `0..1` (ignored for `'silence'`). |
+| `doublePressWindow` | `350` | Max ms between the two taps of a `double`. |
+| `holdMs` | `500` | Min ms a press must be sustained to count as a `hold`. |
+| `repeatGap` | `300` | Max ms between presses to treat them as one hold/auto-repeat run. |
 
 These map onto the three "modes" older plugins expose:
 
-| Old mode     | Equivalent options |
-|--------------|--------------------|
-| `aggressive` | `{ suppressIndicator: true,  keepAtBaseline: true }` (the default) |
-| `silent`     | `{ suppressIndicator: false, keepAtBaseline: false }` — HUD shows, volume changes, presses still detected |
-| `none`       | remove your listeners (`off(...)`) — detection fully stops and native tears down |
+| Old mode | Equivalent options |
+|----------|--------------------|
+| `aggressive` | `{ suppressIndicator: true, keepAtBaseline: true }` (the default) |
+| `silent` | `{ suppressIndicator: false, keepAtBaseline: false }` — HUD shows, volume changes, presses still detected |
+| `none` | remove your listeners — detection fully stops and native tears down |
 
-### Volume control
+### Volume control & misc
 
 - **`getVolume()`** → `Promise<number>` — the current output volume, `0..1`.
 - **`setVolume(level)`** → `Promise<void>` — set the output volume (`0..1`).
-
-### Misc
-
-- **`isRunning()`** → `boolean` — whether detection is currently armed.
+- **`isRunning()`** → `boolean` — whether detection is armed.
+- **`sounds`** — the ambient sounds available: `['silence', 'whitenoise', 'rain']`.
 - **`events`** — the array of event names accepted by `on`/`once`/`off`.
+
+## Locked-screen & cold-start (iOS)
+
+Two symptoms people hit with naïve volume-button plugins — both understood and
+handled here:
+
+**"It only works after I lock and unlock once."** A cold-start race: the audio
+session isn't active at the first press, so the buttons adjust the *ringer*, not
+the *media* volume, and `outputVolume` never changes. A lock/unlock cycle
+re-activates the session and "repairs" it. **This plugin fixes it automatically**
+by re-activating the session shortly after start (and on every app-active /
+interruption-ended event), so detection works from the first press without a
+lock/unlock dance.
+
+**"When I just lock the screen, it stops."** Once locked, iOS suspends the app
+and silences its audio — **unless** the app declares the **Audio background
+mode**. That is the deciding factor, and it's opt-in:
+
+1. Install with `--variable ENABLE_LOCKSCREEN=true` (a bundled hook adds
+   `UIBackgroundModes → audio` to your app's `Info.plist`).
+2. Pick an **audible** ambient sound so the entitlement is legitimate:
+   ```js
+   boogieVolumeButtons.configure({ sound: 'rain', soundVolume: 0.4 });
+   ```
+
+> **App Store note.** Declaring the Audio background mode while playing only
+> *silent* audio is a known **Guideline 2.5.4** rejection risk (reviewers expect
+> to hear something in the background). That's why it's opt-in, and why the
+> plugin ships two genuinely audible, self-generated (royalty-free) ambient
+> sounds — **`whitenoise`** and **`rain`** — so the background audio is real and
+> defensible. Use `'silence'` only if you have another audible background
+> purpose or accept the review risk. The chosen sound plays whenever detection is
+> armed with `background: true`, so pick `'silence'` unless you actually want the
+> ambient audio audible.
+
+**Android** doesn't need the entitlement: the background volume-change broadcast
+plus the looping ambient `MediaPlayer` keep detection alive when locked.
 
 ## How it works
 
-- **iOS** — KVO on `AVAudioSession.outputVolume` detects each press; a hidden,
-  off-screen `MPVolumeView` suppresses the HUD and provides the slider used to
-  snap the level back to `baseline`; a looping silent `AVAudioPlayer` keeps the
-  audio session active so events keep arriving while backgrounded/locked. The
-  session uses the `playback` category with `mixWithOthers`, so background music
-  keeps playing. Self-triggered changes (the snap-back and the initial set) land
-  on the baseline and are ignored.
-- **Android** — in the foreground an `OnKeyListener` on the WebView reads
-  `KEYCODE_VOLUME_UP/DOWN`; consuming the event both detects the press and stops
-  the volume/HUD. While backgrounded or locked, a `VOLUME_CHANGED` broadcast
-  receiver (kept alive by a silent `AudioTrack`) takes over and, with
-  `keepAtBaseline`, resets the level. The receiver ignores changes while the app
-  is foregrounded, so a press is never reported twice.
-- **Browser** — there are no hardware volume keys exposed to web pages, so the
-  proxy **simulates** them from the keyboard: `ArrowUp` = up, `ArrowDown` = down
-  (remappable, see below). The same app code runs and is testable on the
-  desktop.
+- **iOS** — KVO on `AVAudioSession.outputVolume`; a hidden, off-screen
+  `MPVolumeView` suppresses the HUD and provides the slider for the baseline
+  snap-back; a looping ambient `AVAudioPlayer` (silence / white noise / rain)
+  keeps the session active for background/locked detection. A delayed
+  re-activation after start defeats the cold-start "ringer vs media" race.
+- **Android** — a foreground `OnKeyListener` reads `KEYCODE_VOLUME_UP/DOWN`
+  (consumed to suppress the change/HUD, and timed via key repeat/up for a precise
+  hold); backgrounded/locked, a `VOLUME_CHANGED` broadcast receiver — kept alive
+  by a looping ambient `MediaPlayer` — takes over and is ignored while
+  foregrounded so presses never double-fire.
+- **Browser** — no hardware volume keys are exposed to web pages, so the proxy
+  **simulates** them from the keyboard: `ArrowUp` = up, `ArrowDown` = down
+  (remappable). The same app code runs and is testable on the desktop.
 
 ## Behavior notes (read before shipping)
 
 - **Test on a real device (iOS).** `MPVolumeView`-based volume changes — which
   the baseline snap-back relies on — **do not work on the iOS Simulator**.
-- **Background costs battery.** Keeping the audio session/track alive to detect
-  while backgrounded is a real, if small, drain. Set `background: false` if you
-  only need detection while the app is on screen.
-- **iOS background execution.** Detection continues while the app has a
-  background audio context (the silent player provides one while the app is
-  running). For detection to survive the app being *suspended* with the screen
-  off, the app must enable the **Audio** background mode
-  (`UIBackgroundModes` → `audio`) in its `Info.plist`. Add it in your app if you
-  need locked-screen detection over long idle periods.
+- **Background costs battery.** Keeping audio alive to detect while backgrounded
+  is a small drain. Set `background: false` for foreground-only.
 - **Control Center / hardware slider drags** also change `outputVolume` on iOS,
-  so they surface as `up`/`down` events too. Use `delta`/`steps` if you need to
-  distinguish deliberate button taps from a drag.
-- **Android background HUD.** In the background broadcast path the system volume
-  UI cannot be suppressed the way a consumed foreground key can — the change has
-  already happened by the time the broadcast arrives. `keepAtBaseline` still
-  keeps presses working; it just can't hide that brief change.
-- **Simulator/desktop testing** — use the browser platform (keyboard) for logic
-  and the real devices for the native behavior.
+  so they surface as `up`/`down` events. Use `delta`/`steps` to distinguish
+  deliberate taps if needed.
+- **Android background HUD** can't be suppressed in the broadcast path (the
+  change already happened by the time the broadcast arrives); `keepAtBaseline`
+  still keeps presses working.
+- **Inferred holds** (iOS / browser / Android-background) can't tell a real hold
+  from fast mashing, and their duration is approximate; only Android-foreground
+  holds are exact.
+
+## Hard limitations
+
+- **No Audio background mode on iOS → no locked-screen detection.** If the app
+  can't declare it (e.g. to avoid 2.5.4), locked detection is impossible on iOS —
+  the app suspends. Foreground-only is the fallback.
+- **The Simulator** won't detect (device-only).
+- **At the exact 0/max edges without `keepAtBaseline`** a press produces no
+  volume change and so no event — keep the snap-back on for reliable detection.
 
 ## Other physical buttons (iPhone)
 
-Only the volume buttons are capturable as live in-app events. For the record:
+Only the volume buttons are capturable as live in-app events:
 
-- **Action Button (iPhone 15 Pro and later)** — **not** capturable. It is
-  user-configured in Settings (Shortcut / camera / etc.); an app can only
-  publish an App Intent the user *manually* assigns. There is no live
-  "Action button pressed" event.
-- **Camera Control (iPhone 16)** — reachable only via `AVCaptureEventInteraction`
-  (iOS 17.2+) **while an `AVCaptureSession` is active** (camera apps in the
-  foreground). Not usable from a general Cordova WebView.
+- **Action Button (iPhone 15 Pro+)** — **not** capturable; user-configured in
+  Settings (Shortcut / App Intents only), no live press event to an app.
+- **Camera Control (iPhone 16)** — only via `AVCaptureEventInteraction`
+  (iOS 17.2+) while an `AVCaptureSession` is active (camera apps). Not usable
+  from a Cordova WebView.
 - **Power button / ring-silent switch** — not capturable.
 
-That's why volume-button detection remains the standard technique.
-
 ## Browser (development)
-
-The browser build maps the keyboard so you can develop and test without a
-device:
 
 ```js
 // Defaults: ArrowUp = up, ArrowDown = down.
 boogieVolumeButtons.configure({ keys: { up: ['w', 'ArrowUp'], down: ['s', 'ArrowDown'] } });
 ```
 
-`getVolume`/`setVolume` track a simulated level starting at `0.5`.
+Holding a key produces the browser's keyboard auto-repeat, which the gesture
+layer reads as a hold; two quick presses read as a double. `getVolume`/
+`setVolume` track a simulated level starting at `0.5`.
 
 ## TypeScript
 
@@ -221,9 +270,6 @@ boogieVolumeButtons.configure({ keys: { up: ['w', 'ArrowUp'], down: ['s', 'Arrow
 global; most setups pick it up automatically via the `types` field.
 
 ## Migrating from other volume-button plugins
-
-Older plugins expose a single register callback and never tear down. The move
-is mechanical:
 
 ```js
 // benkesmith / manueldeveloper style:
@@ -234,20 +280,15 @@ window.addEventListener('volumebuttonslistener', (e) => { /* e.signal */ });
 boogieVolumeButtons.on('volume', (e) => { /* e.direction */ });
 ```
 
-Modes become options (see the table above), and you can now actually stop
-listening — `off(...)` (or removing the last listener) tears the native side
-down cleanly.
+Modes become options (see the table), you get double/hold gestures for free, and
+`off(...)` (or removing the last listener) tears the native side down cleanly.
 
 ## Ideas / roadmap
 
-Not implemented yet, but a natural fit:
-
-- **Long-press and press/release events** — distinguish a hold from a tap.
-- **Debounce / min-interval option** — collapse rapid or drag-generated events.
-- **Chord / sequence recognition** — "up-up-down" as a single gesture, built on
-  `delta`.
+- **Sequence recognition** — "up-up-down" as one gesture, built on `delta`.
 - **Per-stream selection on Android** (`music`, `ring`, `alarm`, …).
-- **Android foreground-service mode** for guaranteed long locked-screen sessions.
+- **Custom ambient sound** — point `sound` at an app-provided file.
+- **Android foreground-service mode** for guaranteed long locked sessions.
 
 Issues and PRs welcome.
 
@@ -259,12 +300,13 @@ npm test
 
 Runs on Node 18+ with the built-in `node:test` runner — no dev dependencies.
 The suite unit-tests the JS bridge against a mocked `cordova/exec` (lazy
-arm/disarm, event fan-out to `volume`/`up`/`down`, live configuration, option
-clamping, promise helpers, error routing), exercises the browser proxy against a
-faked `window` (keyboard-simulated presses, volume round-trip, key remapping),
-and cross-checks `plugin.xml`, `package.json`, `index.d.ts`, and the native
-sources for consistency (ids, versions, referenced files, feature/service names,
-action coverage, bundled resources).
+arm/disarm, event fan-out, live configuration, option clamping, sound/holdMs
+passthrough, native hold routing, promise helpers, error routing), the gesture
+engine (double detection, inferred holds, native holds, run separation), the
+browser proxy against a faked `window` (keyboard presses, volume round-trip, key
+remapping), and cross-checks `plugin.xml`, `package.json`, `index.d.ts`, and the
+native sources for consistency (ids, versions, platforms, referenced files,
+feature/service names, action coverage, bundled sounds).
 
 ## Layout
 
@@ -273,11 +315,13 @@ plugin.xml                     — Cordova manifest (android + ios + browser)
 package.json                   — npm/cordova metadata, npm test
 index.d.ts                     — TypeScript definitions for the boogieVolumeButtons global
 www/volumebuttons.js           — the JS bridge (global: boogieVolumeButtons)
-src/android/VolumeButtonsPlugin.java — native Android (key listener + broadcast + silent track)
-src/ios/VolumeButtonsPlugin.{h,m}    — native iOS (outputVolume KVO + MPVolumeView + silent player)
-src/ios/silence.mp3            — looped silent audio that keeps the iOS session alive
+www/gestures.js                — double-press / hold gesture engine
+src/android/VolumeButtonsPlugin.java — native Android (key listener + broadcast + ambient player)
+src/ios/VolumeButtonsPlugin.{h,m}    — native iOS (outputVolume KVO + MPVolumeView + ambient player)
+src/audio/{silence,whitenoise,rain}.mp3 — royalty-free ambient keep-alive sounds
 src/browser/volumebuttons.js   — browser proxy (keyboard simulation)
-tests/                         — node:test suite (bridge + browser + structure)
+hooks/enable_background_audio.js — opt-in iOS Audio background mode (ENABLE_LOCKSCREEN)
+tests/                         — node:test suite (bridge + gestures + browser + structure)
 ```
 
 The Java package is `hu.barthazi.volumebuttons`; the iOS class is
