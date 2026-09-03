@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
         id="cordova-plugin-boogie-volumebuttons"
-        version="1.0.0">
+        version="1.1.0">
     <name>Boogie Volume Buttons</name>
     <description>Detect hardware volume Up/Down button presses as events — even while the app is backgrounded or the screen is locked. Optionally suppress the system volume HUD and hold the volume at a baseline so presses keep firing at the 0/max edges. Derives double-press and hold gestures; configurable ambient keep-alive sound (Android, iOS, browser). JS global: boogieVolumeButtons.</description>
     <license>MIT</license>

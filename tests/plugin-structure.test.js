@@ -26,6 +26,22 @@ test('plugin.xml and package.json versions match', () => {
     assert.equal(pluginVersion, pkg.version);
 });
 
+test('the id and version literals in the bridge and every native half match plugin.xml', () => {
+    const java = fs.readFileSync(path.join(root, 'src', 'android', 'VolumeButtonsPlugin.java'), 'utf8');
+    const objc = fs.readFileSync(path.join(root, 'src', 'ios', 'VolumeButtonsPlugin.m'), 'utf8');
+    const browser = fs.readFileSync(path.join(root, 'src', 'browser', 'volumebuttons.js'), 'utf8');
+
+    assert.equal(bridgeJs.match(/var VERSION = '([^']+)'/)[1], pluginVersion, 'www/volumebuttons.js VERSION');
+    assert.equal(browser.match(/var VERSION = '([^']+)'/)[1], pluginVersion, 'src/browser VERSION');
+    assert.equal(java.match(/String VERSION = "([^"]+)"/)[1], pluginVersion, 'Android VERSION');
+    assert.equal(objc.match(/kPluginVersion = @"([^"]+)"/)[1], pluginVersion, 'iOS kPluginVersion');
+
+    assert.equal(bridgeJs.match(/var ID = '([^']+)'/)[1], pluginId, 'www/volumebuttons.js ID');
+    assert.equal(browser.match(/var ID = '([^']+)'/)[1], pluginId, 'src/browser ID');
+    assert.equal(java.match(/String PLUGIN_ID = "([^"]+)"/)[1], pluginId, 'Android PLUGIN_ID');
+    assert.equal(objc.match(/kPluginId = @"([^"]+)"/)[1], pluginId, 'iOS kPluginId');
+});
+
 test('plugin.xml platforms match package.json cordova platforms', () => {
     const platforms = [...pluginXml.matchAll(/<platform name="([^"]+)">/g)].map((m) => m[1]);
     assert.deepEqual(platforms.sort(), [...pkg.cordova.platforms].sort());
@@ -64,8 +80,11 @@ test('every platform implements the actions the JS bridge calls', () => {
     const objc = fs.readFileSync(path.join(root, 'src', 'ios', 'VolumeButtonsPlugin.m'), 'utf8');
     const browser = fs.readFileSync(path.join(root, 'src', 'browser', 'volumebuttons.js'), 'utf8');
 
-    const actions = new Set([...bridgeJs.matchAll(/SERVICE, '(\w+)'/g)].map((m) => m[1]));
-    for (const expected of ['start', 'stop', 'configure', 'getVolume', 'setVolume']) {
+    // Actions the bridge names literally — through exec(..., SERVICE, 'x', ...)
+    // or execRaw('x', ...). The public exec() passthrough forwards an arbitrary
+    // action name and is deliberately outside this closed set.
+    const actions = new Set([...bridgeJs.matchAll(/(?:SERVICE, |execRaw\()'(\w+)'/g)].map((m) => m[1]));
+    for (const expected of ['start', 'stop', 'configure', 'getVolume', 'setVolume', 'describe']) {
         assert.ok(actions.has(expected), `sanity: bridge should call ${expected}`);
     }
 
@@ -74,6 +93,35 @@ test('every platform implements the actions the JS bridge calls', () => {
         assert.ok(objc.includes(`- (void)${action}:`), `iOS is missing action: ${action}`);
         assert.ok(browser.includes(`${action}: function`), `browser proxy is missing action: ${action}`);
     }
+});
+
+test('describe is dispatched everywhere and each reported action list is complete and sorted', () => {
+    const java = fs.readFileSync(path.join(root, 'src', 'android', 'VolumeButtonsPlugin.java'), 'utf8');
+    const objc = fs.readFileSync(path.join(root, 'src', 'ios', 'VolumeButtonsPlugin.m'), 'utf8');
+    const header = fs.readFileSync(path.join(root, 'src', 'ios', 'VolumeButtonsPlugin.h'), 'utf8');
+    const browser = fs.readFileSync(path.join(root, 'src', 'browser', 'volumebuttons.js'), 'utf8');
+    const unquote = (s) => s.replace(/[@'"]/g, '');
+
+    // Android: the switch in execute() vs the ACTIONS constant describe reports.
+    const javaCases = [...java.matchAll(/case "(\w+)":/g)].map((m) => m[1]);
+    const javaActions = java.match(/String\[\] ACTIONS = \{([^}]+)\}/)[1].match(/"\w+"/g).map(unquote);
+    assert.ok(javaCases.includes('describe'), 'Android must dispatch describe');
+    assert.deepEqual(javaActions, [...javaCases].sort(), 'Android ACTIONS must list every case, sorted');
+
+    // iOS: the command selectors the class implements vs the literal describe reports.
+    const objcMethods = [...objc.matchAll(/^- \(void\)(\w+):\(CDVInvokedUrlCommand\*\)command/gm)].map((m) => m[1]);
+    const objcActions = objc.match(/@"actions": @\[([^\]]+)\]/)[1].match(/@"\w+"/g).map(unquote);
+    assert.ok(objcMethods.includes('describe'), 'iOS must dispatch describe');
+    assert.deepEqual(objcActions, [...objcMethods].sort(), 'iOS actions must list every selector, sorted');
+    for (const action of objcMethods) {
+        assert.ok(header.includes(`- (void)${action}:`), `iOS header is missing: ${action}`);
+    }
+
+    // Browser: the proxy's methods vs the literal its describe reports.
+    const browserMethods = [...browser.matchAll(/^\s{4}(\w+): function/gm)].map((m) => m[1]);
+    const browserActions = browser.match(/actions: \[([^\]]+)\]/)[1].match(/'\w+'/g).map(unquote);
+    assert.ok(browserMethods.includes('describe'), 'browser proxy must dispatch describe');
+    assert.deepEqual(browserActions, [...browserMethods].sort(), 'browser actions must list every method, sorted');
 });
 
 test('index.d.ts declares every public bridge method and the global', () => {
@@ -86,6 +134,9 @@ test('index.d.ts declares every public bridge method and the global', () => {
         assert.ok(declared, `index.d.ts is missing: ${method}`);
     }
     assert.ok(dts.includes('declare var boogieVolumeButtons'), 'index.d.ts must declare the global');
+    for (const constant of ['ID', 'VERSION', 'SERVICE']) {
+        assert.ok(dts.includes(`readonly ${constant}: string`), `index.d.ts is missing the ${constant} constant`);
+    }
 });
 
 test('every ambient sound the bridge exposes is bundled for both platforms and exists', () => {

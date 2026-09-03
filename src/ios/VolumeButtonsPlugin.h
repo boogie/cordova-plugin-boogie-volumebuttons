@@ -8,5 +8,6 @@
 - (void)configure:(CDVInvokedUrlCommand*)command;
 - (void)getVolume:(CDVInvokedUrlCommand*)command;
 - (void)setVolume:(CDVInvokedUrlCommand*)command;
+- (void)describe:(CDVInvokedUrlCommand*)command;
 
 @end

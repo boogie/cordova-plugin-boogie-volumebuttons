@@ -6,6 +6,9 @@
 // testable — on the desktop. Configure the keys with
 // boogieVolumeButtons.configure({ keys: { up: [...], down: [...] } }).
 
+var ID = 'cordova-plugin-boogie-volumebuttons';
+var VERSION = '1.1.0'; // keep in sync with plugin.xml (the structure test checks)
+
 var STEP = 1 / 16; // mirrors a typical device volume increment
 
 var eventCallback = null;   // the streaming success callback while running
@@ -96,6 +99,27 @@ module.exports = {
     setVolume: function (success, error, args) {
         level = clamp01(args && args[0], level);
         if (success) success();
+    },
+
+    // Bridge contract v1: what this half is and can do — static facts only,
+    // never fails. `actions` lists every method above, sorted.
+    describe: function (success) {
+        success({
+            id: ID,
+            version: VERSION,
+            platform: 'browser',
+            api: 1,
+            actions: ['configure', 'describe', 'getVolume', 'setVolume', 'start', 'stop'],
+            features: {
+                background: false,   // keyboard events only reach a focused page
+                lockedScreen: false,
+                gestures: true,      // inferred by the JS layer from key auto-repeat
+                preciseHold: false,
+                hudSuppression: false,
+                baseline: false,     // the simulated level moves freely
+                ambientSounds: []    // nothing is played
+            }
+        });
     }
 };
 

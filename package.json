@@ -1,6 +1,6 @@
 {
   "name": "cordova-plugin-boogie-volumebuttons",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Detect hardware volume Up/Down button presses as events — even while the app is backgrounded or the screen is locked. Optionally suppress the system volume HUD and hold the volume at a baseline so presses keep firing at the 0/max edges (Android, iOS, browser). JS global: boogieVolumeButtons.",
   "cordova": {
     "id": "cordova-plugin-boogie-volumebuttons",

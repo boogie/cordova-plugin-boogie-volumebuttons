@@ -47,6 +47,42 @@ interface BoogieVolumeButtonsEventMap {
 
 type BoogieVolumeButtonsSound = 'silence' | 'whitenoise' | 'rain';
 
+/** What describe() resolves: the native half's identity and static capabilities. */
+interface BoogieVolumeButtonsDescription {
+    /** The plugin id, exactly as in plugin.xml. */
+    id: string;
+    /** The native half's version (plugin.xml) — compare with `VERSION` to spot a mismatch. */
+    version: string;
+    platform: 'android' | 'ios' | 'browser';
+    /** Bridge contract revision. */
+    api: number;
+    /** Every action the native half dispatches, sorted, `describe` included. */
+    actions: string[];
+    /** Plugin-specific facts from static or cheap checks — never a prompt or I/O. */
+    features: {
+        /** Detection keeps running while backgrounded (needs the ambient sound). */
+        background: boolean;
+        /** Locked-screen detection is possible in this build (iOS: Audio background mode declared). */
+        lockedScreen: boolean;
+        /** The native stream feeds the double/hold gesture layer. */
+        gestures: boolean;
+        /** Holds are measured from real key down/up (Android foreground) rather than inferred. */
+        preciseHold: boolean;
+        /** The system volume HUD can be hidden (`suppressIndicator`). */
+        hudSuppression: boolean;
+        /** Snap-back to a baseline level is supported (`keepAtBaseline`). */
+        baseline: boolean;
+        /** The ambient keep-alive sounds bundled with this native half. */
+        ambientSounds: BoogieVolumeButtonsSound[];
+        [feature: string]: boolean | number | string | Array<boolean | number | string>;
+    };
+}
+
+/** What exec() rejects with: the native error string on `message`, the raw payload on `native`. */
+interface BoogieVolumeButtonsNativeError extends Error {
+    native: any;
+}
+
 interface BoogieVolumeButtonsOptions {
     /**
      * Hide the system volume HUD. iOS: a hidden MPVolumeView swallows the
@@ -128,6 +164,28 @@ interface BoogieVolumeButtons {
 
     /** Event names accepted by on/once/off. */
     events: Array<keyof BoogieVolumeButtonsEventMap>;
+
+    /**
+     * Resolves what the native half is and can do. Cheap and side-effect free —
+     * nothing is armed, no prompt is shown — and it never rejects natively.
+     */
+    describe(): Promise<BoogieVolumeButtonsDescription>;
+
+    /**
+     * Escape hatch: call a native action straight through cordova.exec, for
+     * actions a newer native half knows and this bridge does not. No option
+     * clamping, no arm/disarm bookkeeping. With `onProgress` every native
+     * success callback is forwarded to it (keepCallback streams); the promise
+     * settles with the first result. Rejects with a BoogieVolumeButtonsNativeError.
+     */
+    exec<T = any>(action: string, args?: any[], onProgress?: (result: T) => void): Promise<T>;
+
+    /** The plugin id (plugin.xml). */
+    readonly ID: string;
+    /** The version this JS bridge was built from (== plugin.xml). */
+    readonly VERSION: string;
+    /** The native service (feature) name used with cordova.exec. */
+    readonly SERVICE: string;
 }
 
 declare var boogieVolumeButtons: BoogieVolumeButtons;

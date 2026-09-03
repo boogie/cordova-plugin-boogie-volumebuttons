@@ -164,6 +164,58 @@ These map onto the three "modes" older plugins expose:
 - **`sounds`** — the ambient sounds available: `['silence', 'whitenoise', 'rain']`.
 - **`events`** — the array of event names accepted by `on`/`once`/`off`.
 
+### Describe and raw exec
+
+A Cordova plugin's JS bridge ships frozen together with its native half — an
+over-the-air update of the app never replaces `plugins/`. Two uniform members
+let app code that is newer than this bridge cope with that:
+
+- **`describe()`** → `Promise<Object>` — what the native half is and can do.
+  Cheap and side-effect free (nothing is armed, no prompt, no audio session),
+  and it never fails natively:
+
+  ```js
+  const info = await boogieVolumeButtons.describe();
+  // {
+  //   id: 'cordova-plugin-boogie-volumebuttons',
+  //   version: '1.1.0',       // the native half's plugin.xml version
+  //   platform: 'android',    // or 'ios' / 'browser'
+  //   api: 1,                 // bridge contract revision
+  //   actions: ['configure', 'describe', 'getVolume', 'setVolume', 'start', 'stop'],
+  //   features: {
+  //     background: true,     // detection keeps running while backgrounded
+  //     lockedScreen: true,   // iOS: whether the Audio background mode is declared
+  //     gestures: true,       // the stream feeds the double/hold gesture layer
+  //     preciseHold: true,    // Android only: exact hold from real key down/up
+  //     hudSuppression: true, // the system volume HUD can be hidden
+  //     baseline: true,       // snap-back to a baseline level is supported
+  //     ambientSounds: ['silence', 'whitenoise', 'rain']
+  //   }
+  // }
+  ```
+
+- **`exec(action, args?, onProgress?)`** → `Promise` — a raw passthrough to
+  `cordova.exec` for this plugin's native service, so an action a newer native
+  half knows can be reached even though this bridge has no method for it. With
+  an `onProgress` function every native success callback is forwarded to it
+  (streams that keep the callback open); the promise settles with the first
+  result. It rejects with an `Error` whose `message` is the native error string
+  (or its `message` field, or its JSON) and whose `.native` holds the raw
+  payload.
+
+  ```js
+  const level = await boogieVolumeButtons.exec('getVolume');
+  ```
+
+  > **Warning.** `exec` bypasses the bridge: no option clamping, no arm/disarm
+  > bookkeeping, no event fan-out. Whatever it does to native state is invisible
+  > to `on`/`off`/`isRunning`. Use it only for actions the bridge does not
+  > expose, and check `describe().actions` first.
+
+- **`ID`**, **`VERSION`**, **`SERVICE`** — the plugin id, the version this JS
+  bridge was built from (compare with `describe().version` to spot a mismatch),
+  and the native service name. Read-only constants on the global.
+
 ## Locked-screen & cold-start (iOS)
 
 Two symptoms people hit with naïve volume-button plugins — both understood and
@@ -301,12 +353,15 @@ npm test
 Runs on Node 18+ with the built-in `node:test` runner — no dev dependencies.
 The suite unit-tests the JS bridge against a mocked `cordova/exec` (lazy
 arm/disarm, event fan-out, live configuration, option clamping, sound/holdMs
-passthrough, native hold routing, promise helpers, error routing), the gesture
-engine (double detection, inferred holds, native holds, run separation), the
-browser proxy against a faked `window` (keyboard presses, volume round-trip, key
-remapping), and cross-checks `plugin.xml`, `package.json`, `index.d.ts`, and the
-native sources for consistency (ids, versions, platforms, referenced files,
-feature/service names, action coverage, bundled sounds).
+passthrough, native hold routing, promise helpers, error routing), the bridge
+contract (`describe()` envelope, `exec()` resolve / reject / stream, read-only
+identity constants), the gesture engine (double detection, inferred holds,
+native holds, run separation), the browser proxy against a faked `window`
+(keyboard presses, volume round-trip, key remapping, `describe`), and
+cross-checks `plugin.xml`, `package.json`, `index.d.ts`, and the native sources
+for consistency (ids, version literals in every source, platforms, referenced
+files, feature/service names, action coverage, sorted `describe` action lists,
+bundled sounds).
 
 ## Layout
 
@@ -321,7 +376,7 @@ src/ios/VolumeButtonsPlugin.{h,m}    — native iOS (outputVolume KVO + MPVolume
 src/audio/{silence,whitenoise,rain}.mp3 — royalty-free ambient keep-alive sounds
 src/browser/volumebuttons.js   — browser proxy (keyboard simulation)
 hooks/enable_background_audio.js — opt-in iOS Audio background mode (ENABLE_LOCKSCREEN)
-tests/                         — node:test suite (bridge + gestures + browser + structure)
+tests/                         — node:test suite (bridge + contract + gestures + browser + structure)
 ```
 
 The Java package is `hu.barthazi.volumebuttons`; the iOS class is

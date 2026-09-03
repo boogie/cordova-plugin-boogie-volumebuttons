@@ -16,12 +16,19 @@
 // Subscribing to a button/gesture event lazily arms native detection; removing
 // the last listener disarms it, so the audio session and hidden volume view are
 // never held without a consumer.
+//
+// Two uniform escape hatches round it off: describe() reports what the native
+// half is and can do (id, version, actions, features), and exec() reaches any
+// native action straight through cordova.exec — for app code newer than this
+// frozen bridge.
 
 'use strict';
 
 var exec = require('cordova/exec');
 var gestures = require('./gestures');
 
+var ID = 'cordova-plugin-boogie-volumebuttons';
+var VERSION = '1.1.0'; // keep in sync with plugin.xml (the structure test checks)
 var SERVICE = 'VolumeButtonsPlugin';
 
 // Raw press events straight off the native stream...
@@ -142,6 +149,35 @@ function assertType (type) {
     }
 }
 
+// Wraps whatever the native side reported in an Error; the raw payload stays on
+// error.native.
+function nativeError (err) {
+    var message = typeof err === 'string' ? err
+        : (err && typeof err.message === 'string') ? err.message
+        : JSON.stringify(err);
+    var error = new Error(message === undefined ? String(err) : message);
+    error.native = err;
+    return error;
+}
+
+// Raw passthrough to cordova.exec — no argument normalisation, no bookkeeping.
+// With an onProgress function every native success callback is forwarded to it
+// (keepCallback streams); the Promise resolves with the first result either way.
+function execRaw (action, args, onProgress) {
+    return new Promise(function (resolve, reject) {
+        var first = true;
+        exec(function (result) {
+            if (typeof onProgress === 'function') onProgress(result);
+            if (first) {
+                first = false;
+                resolve(result);
+            }
+        }, function (err) {
+            reject(nativeError(err));
+        }, SERVICE, action, args || []);
+    });
+}
+
 var boogieVolumeButtons = {
     /**
      * Subscribes to an event. The first button/gesture subscriber arms native
@@ -260,7 +296,33 @@ var boogieVolumeButtons = {
     },
 
     /** Event names accepted by on/once/off. */
-    events: ALL_EVENTS.slice()
+    events: ALL_EVENTS.slice(),
+
+    /**
+     * Resolves what the native half is and can do: { id, version, platform,
+     * api, actions, features }. Cheap and side-effect free — nothing is armed,
+     * no prompt, no audio session — and it never rejects natively.
+     */
+    describe: function () {
+        return execRaw('describe', []);
+    },
+
+    /**
+     * Escape hatch: reach a native action this bridge does not expose. The
+     * bridge ships frozen with the native half, so app code updated over the
+     * air may know actions this file does not. Bypasses every check above —
+     * no option clamping, no arm/disarm bookkeeping, no event fan-out.
+     */
+    exec: function (action, args, onProgress) {
+        return execRaw(action, args, onProgress);
+    }
 };
+
+// Bridge identity — read-only, so app code can't accidentally re-point the bridge.
+Object.defineProperties(boogieVolumeButtons, {
+    ID: { value: ID, enumerable: true },
+    VERSION: { value: VERSION, enumerable: true },
+    SERVICE: { value: SERVICE, enumerable: true }
+});
 
 module.exports = boogieVolumeButtons;

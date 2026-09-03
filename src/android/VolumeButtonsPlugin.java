@@ -19,6 +19,8 @@ import android.os.Build;
 import android.view.KeyEvent;
 import android.view.View;
 
+import java.util.Arrays;
+
 /**
  * Detects hardware volume Up/Down presses and streams them to JavaScript.
  *
@@ -39,6 +41,14 @@ public class VolumeButtonsPlugin extends CordovaPlugin {
     private static final String ACTION_VOLUME_CHANGED = "android.media.VOLUME_CHANGED_ACTION";
     private static final String EXTRA_STREAM_TYPE = "android.media.EXTRA_VOLUME_STREAM_TYPE";
     private static final String EXTRA_VOLUME_VALUE = "android.media.EXTRA_VOLUME_STREAM_VALUE";
+
+    // Bridge contract v1 identity; VERSION must match plugin.xml (the structure test checks).
+    private static final String PLUGIN_ID = "cordova-plugin-boogie-volumebuttons";
+    private static final String VERSION = "1.1.0";
+    // Every action execute() dispatches, sorted — reported by describe.
+    private static final String[] ACTIONS = { "configure", "describe", "getVolume", "setVolume", "start", "stop" };
+    // The ambient keep-alive sounds bundled under res/raw (see plugin.xml).
+    private static final String[] AMBIENT_SOUNDS = { "silence", "whitenoise", "rain" };
 
     private AudioManager audioManager;
     private CallbackContext callback;
@@ -173,9 +183,34 @@ public class VolumeButtonsPlugin extends CordovaPlugin {
                 setVolume((float) args.optDouble(0, 0.5));
                 callbackContext.success();
                 return true;
+            case "describe":
+                callbackContext.success(describe());
+                return true;
             default:
                 return false;
         }
+    }
+
+    // Bridge contract v1: what this native half is and can do, from static facts
+    // only — no AudioManager, no player, no I/O; never fails.
+    private JSONObject describe() throws JSONException {
+        JSONObject features = new JSONObject();
+        features.put("background", true);     // VOLUME_CHANGED receiver + ambient player
+        features.put("lockedScreen", true);   // no entitlement needed on Android
+        features.put("gestures", true);       // holdstart/holdend from real key down/up
+        features.put("preciseHold", true);
+        features.put("hudSuppression", true); // foreground only: the key event is consumed
+        features.put("baseline", true);
+        features.put("ambientSounds", new JSONArray(Arrays.asList(AMBIENT_SOUNDS)));
+
+        JSONObject envelope = new JSONObject();
+        envelope.put("id", PLUGIN_ID);
+        envelope.put("version", VERSION);
+        envelope.put("platform", "android");
+        envelope.put("api", 1);
+        envelope.put("actions", new JSONArray(Arrays.asList(ACTIONS)));
+        envelope.put("features", features);
+        return envelope;
     }
 
     private void start(JSONObject options, CallbackContext callbackContext) {

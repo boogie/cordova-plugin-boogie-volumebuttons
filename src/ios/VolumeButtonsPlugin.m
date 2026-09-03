@@ -28,6 +28,10 @@ static const float kVolumeStep = 1.0f / 16.0f; // a typical hardware increment
 static const float kEpsilon = 0.0005f;
 static const NSTimeInterval kColdStartRekickDelay = 0.4; // seconds
 
+// Bridge contract v1 identity; the version must match plugin.xml (the structure test checks).
+static NSString* const kPluginId = @"cordova-plugin-boogie-volumebuttons";
+static NSString* const kPluginVersion = @"1.1.0";
+
 @interface VolumeButtonsPlugin ()
 @property (nonatomic, strong) MPVolumeView* volumeView;
 @property (nonatomic, strong) AVAudioPlayer* ambientPlayer;
@@ -171,6 +175,35 @@ static const NSTimeInterval kColdStartRekickDelay = 0.4; // seconds
     [self applyVolume:value];
     [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK]
                                 callbackId:command.callbackId];
+}
+
+// Bridge contract v1: what this native half is and can do, from static facts
+// only — no session, no player, no I/O; never fails. `actions` lists every
+// selector Cordova can dispatch here, sorted. `lockedScreen` reflects whether
+// the host app declared the Audio background mode (ENABLE_LOCKSCREEN); the
+// Info.plist dictionary is already in memory by the time a plugin runs.
+- (void)describe:(CDVInvokedUrlCommand*)command
+{
+    NSArray* modes = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"UIBackgroundModes"];
+    BOOL lockedScreen = [modes isKindOfClass:[NSArray class]] && [modes containsObject:@"audio"];
+    NSDictionary* envelope = @{
+        @"id": kPluginId,
+        @"version": kPluginVersion,
+        @"platform": @"ios",
+        @"api": @1,
+        @"actions": @[@"configure", @"describe", @"getVolume", @"setVolume", @"start", @"stop"],
+        @"features": @{
+            @"background": @YES,     // the ambient AVAudioPlayer keeps the session alive
+            @"lockedScreen": @(lockedScreen),
+            @"gestures": @YES,
+            @"preciseHold": @NO,     // holds are inferred from the auto-repeat burst
+            @"hudSuppression": @YES, // the hidden MPVolumeView
+            @"baseline": @YES,
+            @"ambientSounds": @[@"silence", @"whitenoise", @"rain"]
+        }
+    };
+    CDVPluginResult* result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:envelope];
+    [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
 }
 
 #pragma mark - KVO

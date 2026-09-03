@@ -101,8 +101,24 @@ test('the proxy registers under the VolumeButtonsPlugin service', () => {
     mock.loadBrowserProxy();
     assert.strictEqual(mock.proxyRegistrations.length, 1);
     assert.strictEqual(mock.proxyRegistrations[0].service, 'VolumeButtonsPlugin');
-    for (const action of ['start', 'stop', 'configure', 'getVolume', 'setVolume']) {
+    for (const action of ['start', 'stop', 'configure', 'getVolume', 'setVolume', 'describe']) {
         assert.strictEqual(typeof mock.proxyRegistrations[0].impl[action], 'function', action);
     }
     cleanup();
+});
+
+test('describe reports the browser half without needing a window', () => {
+    cleanup(); // static facts only — no window, no listener
+    const proxy = mock.loadBrowserProxy();
+    let info = null;
+    proxy.describe((i) => { info = i; });
+
+    assert.strictEqual(info.id, 'cordova-plugin-boogie-volumebuttons');
+    assert.strictEqual(info.platform, 'browser');
+    assert.strictEqual(info.api, 1);
+    assert.ok(info.actions.includes('describe'));
+    assert.deepStrictEqual(info.actions, [...info.actions].sort(), 'actions are sorted');
+    assert.strictEqual(info.features.background, false);
+    assert.strictEqual(info.features.gestures, true);
+    assert.deepStrictEqual(info.features.ambientSounds, []);
 });
